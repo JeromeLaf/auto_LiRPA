@@ -113,7 +113,16 @@ def forward_general(self: 'BoundedModule', C=None, node:'Bound'=None, concretize
                         break
             if need_refinement:
                 self.forward_refinement(node)
+        if C is None and self.bound_opts.get('forward_bound_gc', False):
+            self.clean_memory(node)
         return lower, upper
+
+    # In forward+backward mode, the backward pass consumes the concrete
+    # intermediate lower/upper bounds, not the forward coefficient tensors.
+    # Advance the coefficient frontier through the graph instead of retaining
+    # every layer's (lw, uw) pair until the final backward pass.
+    if C is None and self.bound_opts.get('forward_bound_gc', False):
+        self.clean_memory(node)
 
 
 def forward_general_dynamic(self: 'BoundedModule', C=None, node:'Bound'=None,
@@ -239,8 +248,16 @@ def forward_general_dynamic(self: 'BoundedModule', C=None, node:'Bound'=None,
 
 
 def clean_memory(self: 'BoundedModule', node):
-    """ Remove linear bounds that are no longer needed. """
-    # TODO add an option to retain these bounds
+    """Remove input coefficient bounds after every consumer has computed.
+
+    ``node.lower`` and ``node.upper`` are deliberately untouched: they are the
+    concrete intermediate bounds used by a subsequent backward CROWN pass.
+
+    INCOMPATIBLE WITH return_A / needed_A_dict: A-matrix export reads the forward
+    coefficient tensors (``inp.linear``) after propagation, which this frees.
+    Only enable ``forward_bound_gc`` on bound passes that do NOT request A
+    matrices (the full-trajectory verifier does not).
+    """
     for inp in node.inputs:
         if hasattr(inp, 'linear') and inp.linear is not None:
             clean = True
@@ -249,9 +266,10 @@ def clean_memory(self: 'BoundedModule', node):
                 if not (hasattr(out_node, 'linear') and out_node.linear is not None):
                     clean = False
             if clean:
-                if isinstance(inp.linear, tuple):
-                    for item in inp.linear:
-                        del item
+                # delattr drops the only reference to the LinearBound (and its
+                # lw/uw), so it becomes collectable. A per-item `del` on a tuple's
+                # elements would only unbind a local and free nothing, so it is
+                # intentionally omitted.
                 delattr(inp, 'linear')
 
 

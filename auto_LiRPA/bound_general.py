@@ -83,6 +83,10 @@ class BoundedModule(nn.Module):
             'enable_opt_interm_bounds': False,
             'crown_batch_size': np.inf,
             'forward_refinement': False,
+            # Release forward-mode coefficient tensors after all of a node's
+            # consumers have materialized their own coefficients. Concrete
+            # intermediate bounds are retained for the backward CROWN pass.
+            'forward_bound_gc': False,
             'forward_max_dim': int(1e9),
             # Do not share alpha for conv layers.
             'use_full_conv_alpha': True,
@@ -1565,7 +1569,8 @@ class BoundedModule(nn.Module):
         IBP_general, _IBP_loss_fusion, check_IBP_intermediate,
         check_IBP_first_linear, compare_with_IBP)
     from .forward_bound import (
-        forward_general, forward_general_dynamic, forward_refinement, init_forward)
+        clean_memory, forward_general, forward_general_dynamic,
+        forward_refinement, init_forward)
     from .backward_bound import (
         backward_general, get_sparse_C,
         check_optimized_variable_sparsity, restore_sparse_bounds,
