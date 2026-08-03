@@ -22,6 +22,13 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from .bound_general import BoundedModule
 
+# Capability flag: the final-C IBP merge below flattens the output interval
+# and the specification matrix before applying C, so explicit-C IBP-family
+# calls are valid for input batch > 1 (and return correctly shaped bounds at
+# batch 1). Callers that would otherwise serialize per-sample (e.g. training
+# losses microbatching CROWN-IBP) can feature-detect this flag.
+FLAT_FINAL_C = True
+
 
 def IBP_general(self: 'BoundedModule', node=None, C=None,
                 delete_bounds_after_use=False):
@@ -95,7 +102,25 @@ def IBP_general(self: 'BoundedModule', node=None, C=None,
 
     if C is not None:
         _delete_unused_bounds(to_be_deleted_bounds)
-        return BoundLinear.interval_propagate(None, node.interval, C=C)
+        interval = node.interval
+        lower, upper = interval[0], interval[1]
+        # C arrives user-shaped (batch, n_spec, *output_shape) while the final
+        # interval keeps the node's multi-dimensional output shape. Applying C
+        # is a batched matvec over the FLATTENED output coordinates,
+        #     out[b, s] = sum_i C[b, s, i] * y[b, i],
+        # so flatten both operands first. Without this, the matmul inside
+        # _propagate_Linf misreads C's spec axis as a batch axis: at batch 1
+        # it silently produced a misshaped (1, S, d, d) product (harmless only
+        # when the caller discards the IBP final bounds, as CROWN-IBP does),
+        # and at batch > 1 it raised the characteristic "batch vs n_spec"
+        # RuntimeError, forcing callers to serialize per-sample.
+        if lower.dim() > 2 or C.dim() > 3:
+            lower = lower.reshape(lower.shape[0], -1)
+            upper = upper.reshape(upper.shape[0], -1)
+            flat_C = C.reshape(C.shape[0], C.shape[1], -1)
+            interval = Interval.make_interval(lower, upper, interval)
+            return BoundLinear.interval_propagate(None, interval, C=flat_C)
+        return BoundLinear.interval_propagate(None, interval, C=C)
     else:
         _delete_unused_bounds(to_be_deleted_bounds)
         return node.interval
