@@ -868,10 +868,19 @@ def get_alpha_crown_start_nodes(
     # When use_full_conv_alpha is True, conv layers do not share alpha.
     sparse_intermediate_bounds = self.bound_opts.get('sparse_intermediate_bounds', False)
     use_full_conv_alpha_thresh = self.bound_opts.get('use_full_conv_alpha_thresh', 512)
+    # alpha_final_only: only allocate alpha for the FINAL start node. Intended
+    # for fixed-interm alpha-CROWN (interm_bounds supplied and fixed): backward
+    # passes then only ever start from the final C, so intermediate start-node
+    # alphas are allocated-but-never-used — and their allocation alone is
+    # (2, interm_specs, batch, neurons), which OOMs on wide conv layers
+    # (e.g. seq250 x hidden96). Off by default; opt in via bound_opts.
+    alpha_final_only = self.bound_opts.get('alpha_final_only', False)
 
     start_nodes = []
 
     for nj in self.backward_from[node.name]:  # Pre-activation layers.
+        if alpha_final_only and nj.name != final_node_name:
+            continue
         unstable_idx = None
         use_sparse_conv = None  # Whether a sparse-spec alpha is used for a conv output node. None for non-conv output node.
         use_full_conv_alpha = self.bound_opts.get('use_full_conv_alpha', False)
