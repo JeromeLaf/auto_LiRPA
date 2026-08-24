@@ -87,7 +87,10 @@ class BoundSShaped(BoundOptimizableActivation):
         l, u = self.inputs[0].lower, self.inputs[0].upper
         shape = l.shape
         # Alpha dimension is (num_params, output_shape, batch, *shape) for the s-shaped activation function.
-        alpha = torch.empty(num_params, size_spec, *shape, device=l.device)
+        # dtype must follow the graph (an fp64 verification pass would otherwise
+        # mix fp32 alphas into fp64 index_put/relaxation math and raise).
+        alpha = torch.empty(num_params, size_spec, *shape,
+                            device=l.device, dtype=l.dtype)
         alpha.data[:4] = (l + u) / 2
         alpha.data[4:6] = self.tp_both_lower_init[name_start]
         alpha.data[6:8] = self.tp_both_upper_init[name_start]
@@ -187,6 +190,10 @@ class BoundSShaped(BoundOptimizableActivation):
             torch.zeros(input_bound.numel(), dtype=torch.long, device=input_bound.device),
             (input_bound / self.step_pre).to(torch.long).reshape(-1)
         ) + 1
+        # The tables are precomputed in the default dtype (float32); a wider
+        # graph dtype (e.g. an fp64 verification pass) must not narrow here,
+        # and mixed-dtype index_put on the consumer side would raise.
+        precomputed_d = precomputed_d.to(input_bound.dtype)
         # If precompute range is smaller than input, tangent points will be taken from default.
         # The default value should be a guaranteed bound
         if index.max() >= precomputed_d.numel():
