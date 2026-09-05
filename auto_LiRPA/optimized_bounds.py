@@ -723,10 +723,34 @@ def _get_optimized_bounds(
 
         if i == iteration - 1:
             best_ret = list(best_ret)
-            if best_ret[0] is not None:
-                best_ret[0] = best_ret[0].to(torch.get_default_dtype())
-            if best_ret[1] is not None:
-                best_ret[1] = best_ret[1].to(torch.get_default_dtype())
+            # [DTYPE] Demote ONLY when this optimisation actually promoted the
+            # graph to fp64 for the last iteration. The guard mirrors
+            # _to_float64 above and _to_default_dtype below, which are both
+            # gated the same way.
+            #
+            # Previously this cast ran UNCONDITIONALLY, which broke a
+            # natively-fp64 graph two ways: the returned bounds silently came
+            # back fp32 from an fp64 computation, and best_ret was left in a
+            # different dtype from full_ret, so the comparison inside
+            # _update_best_ret raised for s-shaped activations (the same
+            # sigmoid/tanh surface this fork already had to fix once).
+            #
+            # NOTE the cast below is round-to-NEAREST, whereas
+            # _to_default_dtype a few lines down uses
+            # double2float(..., 'down'/'up'). Nearest rounding can move a
+            # certified lower bound UP, so it is not sound in general. It is
+            # left unchanged here because that branch is CUDA-only and cannot
+            # be exercised in this environment -- and double2float itself
+            # degrades to a plain x.float() when the CUDA kernels are not
+            # built. The guard is what matters for the fp64 verification path:
+            # it now never reaches this cast at all.
+            if (self.device == 'cuda'
+                    and torch.get_default_dtype() == torch.float32
+                    and use_float64_in_last_iteration):
+                if best_ret[0] is not None:
+                    best_ret[0] = best_ret[0].to(torch.get_default_dtype())
+                if best_ret[1] is not None:
+                    best_ret[1] = best_ret[1].to(torch.get_default_dtype())
 
         if (i == iteration - 1 and self.device == 'cuda'
                 and torch.get_default_dtype() == torch.float32
