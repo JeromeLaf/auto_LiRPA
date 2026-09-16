@@ -25,9 +25,22 @@ class DummyCudaClass:
     def __getattr__(self, attr):
         if attr == "double2float":
             # When CUDA module is not built successfully, use a workaround.
+            # The workaround must still round in the REQUESTED direction: the
+            # kernel exists precisely because a nearest-rounded fp64 -> fp32
+            # cast can move a certified lower bound up (or an upper bound
+            # down), and a plain x.float() here silently reintroduces exactly
+            # that unsoundness on any machine without the kernels.
             def _f(x, d):
                 print('WARNING: Missing CUDA kernels. Please enable CUDA build by setting environment variable AUTOLIRPA_ENABLE_CUDA_BUILD=1 for the correct behavior!')
-                return x.float()
+                if d not in ('down', 'up'):
+                    raise ValueError("double2float direction must be 'down' or 'up'; got %r" % (d,))
+                upper = (d == 'up')
+                out = x.float()
+                if out.dtype == x.dtype:
+                    return out
+                inward = out.to(x.dtype) < x if upper else out.to(x.dtype) > x
+                direction = torch.full_like(out, float('inf') if upper else float('-inf'))
+                return torch.where(inward, torch.nextafter(out, direction), out)
             return _f
         def _f(*args, **kwargs):
             raise RuntimeError(f"method {attr} not available because CUDA module was not built.")

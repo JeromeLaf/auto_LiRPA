@@ -149,6 +149,29 @@ def _save_ret_first_time(bounds, best_ret):
         best_ret.append(None)
 
 
+def _outward_cast(value, dtype, upper):
+    """Cast a bound tensor, rounding AWAY from the interval (down for a lower
+    bound, up for an upper one).
+
+    A plain `.to(dtype)` rounds to nearest, which can move a certified lower
+    bound UP or an upper bound DOWN by up to half an ulp of the narrower type
+    -- an unsound narrowing of the certificate. Casting first and then stepping
+    one ulp outward whenever the round-trip landed inside the original value
+    restores the enclosure. Exact when `dtype` already matches, so this is a
+    no-op on a graph that was never promoted.
+    """
+    if value is None:
+        return None
+    result = value.to(dtype)
+    if result.dtype == value.dtype:
+        return result
+    back = result.to(value.dtype)
+    inward = back < value if upper else back > value
+    direction = torch.full_like(
+        result, float('inf') if upper else float('-inf'))
+    return torch.where(inward, torch.nextafter(result, direction), result)
+
+
 def _to_float64(self: 'BoundedModule', C, x, aux_reference_bounds, interm_bounds):
     """
     Transfer variables to float64 only in the last iteration to help alleviate
@@ -735,22 +758,27 @@ def _get_optimized_bounds(
             # _update_best_ret raised for s-shaped activations (the same
             # sigmoid/tanh surface this fork already had to fix once).
             #
-            # NOTE the cast below is round-to-NEAREST, whereas
-            # _to_default_dtype a few lines down uses
-            # double2float(..., 'down'/'up'). Nearest rounding can move a
-            # certified lower bound UP, so it is not sound in general. It is
-            # left unchanged here because that branch is CUDA-only and cannot
-            # be exercised in this environment -- and double2float itself
-            # degrades to a plain x.float() when the CUDA kernels are not
-            # built. The guard is what matters for the fp64 verification path:
-            # it now never reaches this cast at all.
+            # [DTYPE] The cast itself now rounds OUTWARD (lower bound down,
+            # upper bound up), matching what _to_default_dtype does for
+            # full_ret via double2float('down'/'up'). It used to be a plain
+            # .to(dtype), i.e. round-to-NEAREST, which can move a certified
+            # LOWER bound UP and an UPPER bound DOWN -- unsound, and only
+            # unreachable by accident: the repo's own verification path escapes
+            # it three times over (it passes a torch.device, so the
+            # `self.device == 'cuda'` string comparison is False; it sets the
+            # default dtype to the graph's fp64; and it never enables
+            # use_float64_in_last_iteration), but abcrown reaches this branch
+            # with a string device whenever the flag is set. Do not rely on
+            # reachability for soundness.
             if (self.device == 'cuda'
                     and torch.get_default_dtype() == torch.float32
                     and use_float64_in_last_iteration):
                 if best_ret[0] is not None:
-                    best_ret[0] = best_ret[0].to(torch.get_default_dtype())
+                    best_ret[0] = _outward_cast(
+                        best_ret[0], torch.get_default_dtype(), upper=False)
                 if best_ret[1] is not None:
-                    best_ret[1] = best_ret[1].to(torch.get_default_dtype())
+                    best_ret[1] = _outward_cast(
+                        best_ret[1], torch.get_default_dtype(), upper=True)
 
         if (i == iteration - 1 and self.device == 'cuda'
                 and torch.get_default_dtype() == torch.float32
